@@ -7,7 +7,7 @@ Entrées :
     - x[] : composition (fractions molaires de chaque composant)
 
 Si D n’est pas donné (cas le plus courant) :
-    // On cherche la densité correspondant à (T, P, x)
+    On cherche la densité correspondant à (T, P, x)
     Initialiser la densité D (par exemple avec le modèle gaz parfait ou à l’aide du point pseudo-critique)
     Pour n = 1 à N_max (itérations de Newton) :
         1. Calculer les paramètres de réduction (T_r, D_r) pour le mélange :
