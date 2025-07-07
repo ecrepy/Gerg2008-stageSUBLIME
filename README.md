@@ -1,6 +1,49 @@
 # Gerg2008-stageSUBLIME
 Modélisation du mélange de fluide
 
+Entrées :
+    - T : température (K)
+    - P ou D : pression (Pa) OU densité molaire (mol/L)
+    - x[] : composition (fractions molaires de chaque composant)
+
+Si D n’est pas donné (cas le plus courant) :
+    // On cherche la densité correspondant à (T, P, x)
+    Initialiser la densité D (par exemple avec le modèle gaz parfait ou à l’aide du point pseudo-critique)
+    Pour n = 1 à N_max (itérations de Newton) :
+        1. Calculer les paramètres de réduction (T_r, D_r) pour le mélange :
+            T_r, D_r ← ReducingParametersGERG(x)
+        2. Calculer les variables réduites :
+            tau   ← T_r / T
+            delta ← D / D_r
+        3. Calculer la fonction d’Helmholtz idéale et ses dérivées :
+            a0[0:2] ← Alpha0GERG(T, D, x)
+        4. Calculer la fonction d’Helmholtz résiduelle et ses dérivées :
+            ar[0:3][0:3] ← AlpharGERG(tau, delta, x)
+        5. Calculer la pression associée à la densité courante :
+            Z ← 1 + ar[0][1]
+            P_calc ← D * R * T * Z
+        6. Vérifier l’écart entre P_calc et P_cible :
+            Si |P_calc - P| < tolérance :
+                La densité D est trouvée, sortir de la boucle
+            Sinon :
+                Calculer la dérivée dP/dD à partir des dérivées de Helmholtz
+                Ajuster D à l’aide de la méthode de Newton-Raphson
+    Si convergence échouée :
+        Retourner D_gaz_parfait, signaler une erreur
+
+// Une fois D trouvé, calculer toutes les propriétés demandées :
+1. Recalculer les paramètres de réduction et variables réduites
+2. Recalculer a0 et ar avec D final
+3. Extraire les propriétés :
+    - Pression, facteur Z
+    - Énergie interne, enthalpie, entropie
+    - Cp, Cv, vitesse du son, coefficient de Joule-Thomson, etc.
+
+Sorties :
+    - D, Z, H, S, Cp, Cv, W, JT, etc.
+
+    
+
 Fonction Pression 
 AlpharGERG : calcule la fonction de Helmholtz résiduelle, qui encode toutes les interactions non idéales du mélange.
 ar[0][1] : c’est la dérivée de la fonction résiduelle par rapport à la densité réduite, qui permet de corriger le facteur de compressibilité par rapport au gaz parfait.
