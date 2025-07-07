@@ -1,0 +1,600 @@
+void PressureGERG(const double T, const double D, const std::vector<double> &x, double &P, double &Z)
+{
+    double ar[4][4]; 
+    // ar est un tableau qui stockera les dérivées partielles de la fonction de Helmholtz résiduelle
+    // ar[i][j] représente la dérivée d'ordre i par rapport à la température réduite tau et d'ordre j par rapport à la densité réduite delta
+
+    AlpharGERG(0, 0, T, D, x, ar);
+    // Appelle la fonction AlpharGERG qui calcule la fonction de Helmholtz résiduelle (et ses dérivées) pour le mélange défini par x, à la température T et la densité D.
+    // Les résultats sont stockés dans ar.
+
+    Z = 1 + ar[0][1];
+    // Z est le facteur de compressibilité du gaz (Z = PV/RT).
+    // Il s’obtient ici par la dérivée partielle d’Helmholtz par rapport à la densité réduite delta.
+    // ar[0][1] = (∂αr/∂δ) où αr est la partie résiduelle de Helmholtz.
+
+    P = D * RGERG * T * Z;
+    // Calcul de la pression (P = D * R * T * Z) :
+    // - D : densité molaire (mol/L ou mol/m³)
+    // - RGERG : constante des gaz spécifique au modèle GERG (généralement R universelle, 8.314…)
+    // - T : température absolue
+    // - Z : facteur de compressibilité calculé juste avant
+
+    dPdDsave = RGERG * T * (1 + 2 * ar[0][1] + ar[0][2]);
+    // Sauvegarde de la dérivée de la pression par rapport à la densité (utile pour les méthodes itératives, ex: Newton-Raphson)
+    // Cette expression est la dérivée analytique de P par rapport à D, en tenant compte de la dépendance de Z à D :
+    // dP/dD = R*T*(1 + 2*(∂αr/∂δ) + (∂²αr/∂δ²))
+}
+
+
+
+
+
+void DensityGERG(const int iFlag, const double T, const double P, const std::vector<double> &x, double &D, int &ierr, std::string &herr)
+{
+    // --- Déclarations ---
+    int nFail, iFail;
+    double plog, vlog, P2, Z, dpdlv, vdiff, tolr, vinc;
+    double Tcx, Dcx;
+    // Variables pour propriétés avancées (utilisées seulement si iFlag>0)
+    double dPdD, d2PdD2, d2PdTD, dPdT, U, H, S, A;
+    double Cv, Cp, W, G, JT, Kappa, PP;
+
+    // --- Initialisation des statuts ---
+    ierr = 0;          // Code d'erreur (0 = pas d'erreur)
+    herr = "";         // Message d'erreur
+    nFail = 0;         // Nombre d'échecs successifs de convergence
+    iFail = 0;         // Indicateur d'échec lors d'une itération
+
+    // --- Vérification pression nulle ---
+    if (P < epsilon) { D = 0; return; }
+
+    // --- Tolérance de convergence ---
+    tolr = 0.0000001;
+
+    // --- Calcul du point pseudo-critique du mélange ---
+    PseudoCriticalPointGERG(x, Tcx, Dcx);
+
+    // --- Estimation initiale de la densité ---
+    if (D > -epsilon){
+        D = P / RGERG / T;                // Estimation gaz parfait pour la phase vapeur
+        if (iFlag == 2){ D = Dcx*3; }     // Pour la phase liquide, estimation initiale différente
+    }
+    else{
+        D = std::abs(D);                  // Si D<0, on utilise sa valeur absolue comme estimation initiale
+    }
+
+    // --- Passage en log-volume et log-pression pour la méthode de Newton ---
+    plog = log(P);
+    vlog = -log(D);
+
+    // --- Boucle principale d'itération (max 50 tours) ---
+    for (int it = 1; it <= 50; ++it){
+        // --- Relance de l'initialisation si état aberrant ou trop d’itérations ---
+        if (vlog < -7 || vlog > 100 || it == 20 || it == 30 || it == 40 || iFail == 1){
+            iFail = 0;
+            if (nFail > 2) {
+                // Convergence impossible, on renvoie l’estimation gaz parfait
+                ierr = 1;
+                herr = "Calculation failed to converge in GERG method, ideal gas density returned.";
+                D = P / RGERG / T;
+                return;
+            }
+            nFail++;
+            if (nFail == 1){
+                D = Dcx * 3; // On tente une racine en zone liquide
+            }
+            else if (nFail == 2) {
+                D = Dcx * 2.5; // Entre liquide et critique
+            }
+            else if (nFail == 3) {
+                D = Dcx * 2; // Zone critique
+            }
+            vlog = -log(D); // Redéfinition du log-volume
+        }
+
+        // --- Calcul de la densité courante ---
+        D = exp(-vlog);
+
+        // --- Calcul de la pression associée à cette densité ---
+        PressureGERG(T, D, x, P2, Z);
+
+        // --- Si la dérivée ou la pression deviennent négatives ou nulles (état 2 phases probable) ---
+        if (dPdDsave < epsilon || P2 < epsilon){
+            vinc = 0.1;
+            if (D > Dcx) { vinc = -0.1; }      // Signe du pas selon la zone
+            if (it > 5) { vinc = vinc / 2; }
+            if (it > 10 && it < 20) { vinc = vinc / 5; }
+            vlog += vinc;                      // On tente un autre état
+        }
+        else{
+            // --- Schéma de Newton-Raphson sur log(volume) ---
+            dpdlv = -D * dPdDsave;             // Dérivée de P par rapport à log(volume)
+            vdiff = (log(P2) - plog) * P2 / dpdlv;
+            vlog += - vdiff;
+
+            // --- Test de convergence ---
+            if (std::abs(vdiff) < tolr) {
+                // --- Si la dérivée est négative, probablement état 2 phases, on relance ---
+                if (dPdDsave < 0){
+                    iFail = 1;
+                }
+                else{
+                    D = exp(-vlog);
+
+                    // --- Si demandé, test de stabilité thermodynamique (iFlag > 0) ---
+                    if (iFlag > 0){
+                        PropertiesGERG(T, D, x, PP, Z, dPdD, d2PdD2, d2PdTD, dPdT, U, H, S, Cv, Cp, W, G, JT, Kappa, A);
+                        if ((PP <= 0 || dPdD <= 0 || d2PdTD <= 0) || (Cv <= 0 || Cp <= 0 || W <= 0)) {
+                            ierr = 1;
+                            herr = "Calculation failed to converge in GERG method, ideal gas density returned.";
+                            D = P / RGERG / T;
+                        }
+                        return; // Fin si instable
+                    }
+                    return; // Fin normale : convergence atteinte
+                }
+            }
+        }
+    }
+    // --- Si la boucle sort sans convergence ---
+    ierr = 1;
+    herr = "Calculation failed to converge in GERG method, ideal gas density returned.";
+    D = P / RGERG / T;
+}
+
+
+
+void PropertiesGERG(const double T, const double D, const std::vector<double> &x,
+                    double &P, double &Z, double &dPdD, double &d2PdD2, double &d2PdTD, double &dPdT,
+                    double &U, double &H, double &S, double &Cv, double &Cp, double &W,
+                    double &G, double &JT, double &Kappa, double &A)
+{
+    double a0[2+1], ar[3+1][3+1], Mm, R, RT;
+
+    // 1. Calcul de la masse molaire du mélange
+    MolarMassGERG(x, Mm);
+
+    // 2. Calcul de la fonction d'Helmholtz idéale et de ses dérivées (a0[0]=alpha0, a0[1]=d(alpha0)/d(tau), a0[2]=d2(alpha0)/d(tau)^2)
+    Alpha0GERG(T, D, x, a0);
+
+    // 3. Calcul de la fonction d'Helmholtz résiduelle réelle et de ses dérivées
+    // ar[i][j] = d^i/d(tau)^i d^j/d(delta)^j (alphar)
+    AlpharGERG(1, 0, T, D, x, ar);
+
+    R = RGERG;     // Constante des gaz (J/mol/K)
+    RT = R * T;    // Produit R*T, utilisé souvent dans les équations
+
+    // 4. Facteur de compressibilité Z
+    Z = 1 + ar[0][1];
+
+    // 5. Pression (P)
+    P = D * RT * Z;
+
+    // 6. Dérivée de la pression par rapport à la densité (à T constant)
+    dPdD = RT * (1 + 2 * ar[0][1] + ar[0][2]);
+
+    // 7. Dérivée de la pression par rapport à la température (à D constant)
+    dPdT = D * R * (1 + ar[0][1] - ar[1][1]);
+
+    // 8. Dérivée croisée seconde de la pression par rapport à T et D
+    d2PdTD = R * (1 + 2 * ar[0][1] + ar[0][2] - 2 * ar[1][1] - ar[1][2]);
+
+    // 9. Énergie libre d'Helmholtz (A)
+    A = RT * (a0[0] + ar[0][0]);
+
+    // 10. Énergie libre de Gibbs (G)
+    G = RT * (1 + ar[0][1] + a0[0] + ar[0][0]);
+
+    // 11. Énergie interne (U)
+    U = RT * (a0[1] + ar[1][0]);
+
+    // 12. Enthalpie (H)
+    H = RT * (1 + ar[0][1] + a0[1] + ar[1][0]);
+
+    // 13. Entropie (S)
+    S = R * (a0[1] + ar[1][0] - a0[0] - ar[0][0]);
+
+    // 14. Capacité calorifique à volume constant (Cv)
+    Cv = -R * (a0[2] + ar[2][0]);
+
+    // 15. Capacité calorifique à pression constante (Cp), et autres dérivées
+    if (D > epsilon){
+        Cp = Cv + T * (dPdT / D) * (dPdT / D) / dPdD;
+        d2PdD2 = RT * (2 * ar[0][1] + 4 * ar[0][2] + ar[0][3]) / D;
+        // Coefficient de Joule-Thomson (JT)
+        JT = (T / D * dPdT / dPdD - 1) / Cp / D;
+    }
+    else{
+        Cp = Cv + R;   // Limite gaz parfait
+        d2PdD2 = 0;
+        JT = 1E+20;    // Valeur très grande : non physique, évite des erreurs
+    }
+
+    // 16. Vitesse du son (W)
+    W = 1000 * Cp / Cv * dPdD / Mm;
+    if (W < 0) { W = 0; }
+    W = sqrt(W);
+
+    // 17. Compressibilité isentropique (Kappa)
+    Kappa = pow(W, 2) * Mm / (RT * 1000 * Z);
+}
+
+
+
+static void ReducingParametersGERG(const std::vector<double> &x, double &Tr, double &Dr)
+{
+  double Vr, xij, F;
+  int icheck;
+
+  // Vérifie si la composition a changé depuis le dernier appel (pour éviter des recalculs inutiles)
+  icheck = 0;
+  for (int i = 1; i <= NcGERG; ++i){
+    if (std::abs(x[i] - xold[i]) > 0.0000001){ icheck = 1; }
+    xold[i] = x[i];
+  }
+  if (icheck == 0){
+    // Si la composition n'a pas changé, on réutilise les anciens paramètres
+    Dr = Drold;
+    Tr = Trold;
+    return;
+  }
+  // Réinitialisation de variables de contrôle (pour d'autres éventuels usages)
+  Told = 0;
+  Trold2 = 0;
+
+  // --- Calcul des variables de réduction ---
+  Dr = 0; // densité de réduction du mélange
+  Vr = 0; // volume molaire de réduction du mélange (avant inversion)
+  Tr = 0; // température de réduction du mélange
+
+  // Boucle sur chaque composant i du mélange
+  for (int i = 1; i <= NcGERG; ++i){
+    if (x[i] > epsilon){ // On ne traite que les composants présents
+      F = 1;
+      // Boucle interne sur les composants j (i à NcGERG)
+      for (int j = i; j <= NcGERG; ++j){
+        if (x[j] > epsilon){
+          // Calcul du facteur de pondération binaire ou ternaire (selon GERG)
+          xij = F * (x[i] * x[j]) * (x[i] + x[j]);
+          // Contribution au volume de réduction du mélange
+          Vr = Vr + xij * gvij[i][j] / (bvij[i][j] * x[i] + x[j]);
+          // Contribution à la température de réduction du mélange
+          Tr = Tr + xij * gtij[i][j] / (btij[i][j] * x[i] + x[j]);
+          F = 2; // Après la première combinaison, F=2 pour les termes croisés
+        }
+      }
+    }
+  }
+  // Conversion du volume en densité de réduction (Dr = 1/Vr)
+  if (Vr > epsilon){ Dr = 1 / Vr; }
+
+  // Sauvegarde des valeurs pour accélérer les appels ultérieurs
+  Drold = Dr;
+  Trold = Tr;
+}
+
+
+
+static void ReducingParametersGERG(const std::vector<double> &x, double &Tr, double &Dr)
+{
+  double Vr, xij, F;
+  int icheck;
+
+  // Vérifie si la composition a changé depuis le dernier appel (pour éviter des recalculs inutiles)
+  icheck = 0;
+  for (int i = 1; i <= NcGERG; ++i){
+    if (std::abs(x[i] - xold[i]) > 0.0000001){ icheck = 1; }
+    xold[i] = x[i];
+  }
+  if (icheck == 0){
+    // Si la composition n'a pas changé, on réutilise les anciens paramètres
+    Dr = Drold;
+    Tr = Trold;
+    return;
+  }
+  // Réinitialisation de variables de contrôle (pour d'autres éventuels usages)
+  Told = 0;
+  Trold2 = 0;
+
+  // --- Calcul des variables de réduction ---
+  Dr = 0; // densité de réduction du mélange
+  Vr = 0; // volume molaire de réduction du mélange (avant inversion)
+  Tr = 0; // température de réduction du mélange
+
+  // Boucle sur chaque composant i du mélange
+  for (int i = 1; i <= NcGERG; ++i){
+    if (x[i] > epsilon){ // On ne traite que les composants présents
+      F = 1;
+      // Boucle interne sur les composants j (i à NcGERG)
+      for (int j = i; j <= NcGERG; ++j){
+        if (x[j] > epsilon){
+          // Calcul du facteur de pondération binaire ou ternaire (selon GERG)
+          xij = F * (x[i] * x[j]) * (x[i] + x[j]);
+          // Contribution au volume de réduction du mélange
+          Vr = Vr + xij * gvij[i][j] / (bvij[i][j] * x[i] + x[j]);
+          // Contribution à la température de réduction du mélange
+          Tr = Tr + xij * gtij[i][j] / (btij[i][j] * x[i] + x[j]);
+          F = 2; // Après la première combinaison, F=2 pour les termes croisés
+        }
+      }
+    }
+  }
+  // Conversion du volume en densité de réduction (Dr = 1/Vr)
+  if (Vr > epsilon){ Dr = 1 / Vr; }
+
+  // Sauvegarde des valeurs pour accélérer les appels ultérieurs
+  Drold = Dr;
+  Trold = Tr;
+}
+
+
+static void Alpha0GERG(const double T, const double D, const std::vector<double> &x, double a0[3]) {
+  // a0[0] : valeur de la fonction de Helmholtz idéale (alpha0)
+  // a0[1] : première dérivée par rapport à tau (tau = T_r / T)
+  // a0[2] : seconde dérivée par rapport à tau
+  
+  double LogT, LogD, LogHyp, th0T, LogxD;
+  double SumHyp0, SumHyp1, SumHyp2;
+  double em, ep, hcn, hsn; // Exponentielles et combinaisons hyperboliques
+  
+  a0[0] = 0; a0[1] = 0; a0[2] = 0; // Initialisation
+
+  // Logarithme de la densité, évite log(0)
+  if (D > epsilon) { LogD = log(D); } 
+  else { LogD = log(epsilon); } // epsilon = plus petite valeur non nulle
+
+  // Logarithme de la température
+  LogT = log(T);
+  
+  // Boucle sur tous les composants purs du mélange
+  for (int i = 1; i <= NcGERG; ++i){
+    if (x[i] > epsilon){ // Ne traite que les composants présents
+      LogxD = LogD + log(x[i]); // log(rho_i) = log(rho) + log(x_i)
+      SumHyp0 = 0;
+      SumHyp1 = 0;
+      SumHyp2 = 0;
+
+      // Boucle sur les termes hyperboliques (j=4 à 7)
+      for (int j = 4; j <= 7; ++j){
+        if (th0i[i][j] > epsilon){
+          th0T = th0i[i][j] / T; // Paramètre d'énergie sur T
+          ep = exp(th0T);        // exp(+theta/T)
+          em = 1 / ep;           // exp(-theta/T)
+          hsn = (ep - em) / 2;   // sinh(theta/T)
+          hcn = (ep + em) / 2;   // cosh(theta/T)
+          
+          if (j == 4 || j == 6){
+            // Pour certains termes, on utilise le sinh (hsn)
+            LogHyp = log(std::abs(hsn));
+            SumHyp0 = SumHyp0 + n0i[i][j] * LogHyp;
+            SumHyp1 = SumHyp1 + n0i[i][j] * th0T * hcn / hsn;
+            SumHyp2 = SumHyp2 + n0i[i][j] * (th0T / hsn) * (th0T / hsn);
+          }
+          else{
+            // Pour d'autres, c'est le cosh (hcn)
+            LogHyp = log(std::abs(hcn));
+            SumHyp0 = SumHyp0 - n0i[i][j] * LogHyp;
+            SumHyp1 = SumHyp1 - n0i[i][j] * th0T * hsn / hcn;
+            SumHyp2 = SumHyp2 + n0i[i][j] * (th0T / hcn) * (th0T / hcn);
+          }
+        }
+      }
+      // Ajout de la contribution de ce composant à la fonction alpha0 et ses dérivées
+      a0[0] += +x[i] * (LogxD + n0i[i][1] + n0i[i][2] / T - n0i[i][3] * LogT + SumHyp0);
+      a0[1] += +x[i] * (n0i[i][3] + n0i[i][2] / T + SumHyp1);
+      a0[2] += -x[i] * (n0i[i][3] + SumHyp2);
+    }
+  }
+}
+
+
+
+static void AlpharGERG(
+    const int itau,   // 1 : calcule les dérivées par rapport à tau (=Tr/T), 0 : non
+    const int idelta, // (non utilisé ici, mais pourrait activer les dérivées par rapport à delta)
+    const double T,   // Température (K)
+    const double D,   // Densité molaire du mélange (mol/L ou mol/m³)
+    const std::vector<double> &x, // Composition du mélange (fractions molaires)
+    double ar[4][4]   // Tableau résultat : ar[i][j] = dérivées d'ordre i (tau) et j (delta) de αr
+)
+{
+    int mn;
+    double Tr, Dr, del, tau;
+    double lntau, ex, ex2, ex3, cij0, eij0;
+    double delp[8], Expd[8], ndt, ndtd, ndtt, xijf;
+
+    // --- Initialisation du tableau des dérivées ---
+    for (int i = 0; i <= 3; ++i)
+        for (int j = 0; j <= 3; ++j)
+            ar[i][j] = 0;
+
+    // --- Calcul des variables réduites ---
+    ReducingParametersGERG(x, Tr, Dr); // Calcule Tr, Dr pour la composition x
+    del = D / Dr;                      // Densité réduite (delta)
+    tau = Tr / T;                      // Température réduite (tau)
+    lntau = log(tau);
+
+    // --- Pré-calcul des puissances de delta et exponentielles ---
+    delp[1] = del;
+    Expd[1] = exp(-delp[1]);
+    for (int i = 2; i <= 7; ++i){
+        delp[i] = delp[i - 1] * del;
+        Expd[i] = exp(-delp[i]);
+    }
+
+    // --- Mise à jour éventuelle des termes dépendant de la température ---
+    if (std::abs(T - Told) > 0.0000001 || std::abs(Tr - Trold2) > 0.0000001) {
+        tTermsGERG(lntau, x); // (Préparation de termes intermédiaires ; dépend de l’implémentation)
+    }
+    Told = T;
+    Trold2 = Tr;
+
+    // --- 1. Contributions des fluides purs ---
+    for (int i = 1; i <= NcGERG; ++i){
+        if (x[i] > epsilon){
+            // a) Terme polynomial en delta et tau
+            for (int k = 1; k <= kpol[i]; ++k){
+                ndt = x[i] * delp[doik[i][k]] * taup[i][k];
+                ndtd = ndt * doik[i][k];
+                ar[0][1] += ndtd; // dérivée 1ère par rapport à delta
+                ar[0][2] += ndtd * (doik[i][k] - 1); // dérivée 2nde par rapport à delta
+                if (itau > 0){
+                    ndtt = ndt * toik[i][k];
+                    ar[0][0] += ndt; // alpha_r lui-même
+                    ar[1][0] += ndtt; // dérivée 1ère par rapport à tau
+                    ar[2][0] += ndtt * (toik[i][k] - 1); // dérivée 2nde tau
+                    ar[1][1] += ndtt * doik[i][k]; // croisée tau/delta
+                    ar[1][2] += ndtt * doik[i][k] * (doik[i][k] - 1);
+                    ar[0][3] += ndtd * (doik[i][k] - 1) * (doik[i][k] - 2);
+                }
+            }
+            // b) Terme exponentiel en delta (effet non-linéaire, typique des forces à courte portée)
+            for (int k = 1 + kpol[i]; k <= kpol[i] + kexp[i]; ++k){
+                ndt = x[i] * delp[doik[i][k]] * taup[i][k]*Expd[coik[i][k]];
+                ex = coik[i][k] * delp[coik[i][k]];
+                ex2 = doik[i][k] - ex;
+                ex3 = ex2 * (ex2 - 1);
+                ar[0][1] += ndt * ex2;
+                ar[0][2] += ndt * (ex3 - coik[i][k] * ex);
+                if (itau > 0){
+                    ndtt = ndt * toik[i][k];
+                    ar[0][0] += ndt;
+                    ar[1][0] += ndtt;
+                    ar[2][0] += ndtt * (toik[i][k] - 1);
+                    ar[1][1] += ndtt * ex2;
+                    ar[1][2] += ndtt * (ex3 - coik[i][k] * ex);
+                    ar[0][3] += ndt * (ex3 * (ex2 - 2) - ex * (3 * ex2 - 3 + coik[i][k]) * coik[i][k]);
+                }
+            }
+        }
+    }
+
+    // --- 2. Contributions des interactions binaires (mélange) ---
+    for (int i = 1; i <= NcGERG - 1; ++i){
+        if (x[i] > epsilon){
+            for (int j = i + 1; j <= NcGERG; ++j){
+                if (x[j] > epsilon){
+                    mn = mNumb[i][j]; // Index d’accès aux données d’interaction binaire
+                    if (mn >= 0){
+                        xijf = x[i] * x[j] * fij[i][j];
+                        // a) Terme polynomial
+                        for (int k = 1; k <= kpolij[mn]; ++k){
+                            ndt = xijf * delp[dijk[mn][k]] * taupijk[mn][k];
+                            ndtd = ndt * dijk[mn][k];
+                            ar[0][1] += ndtd;
+                            ar[0][2] += ndtd * (dijk[mn][k] - 1);
+                            if (itau > 0){
+                                ndtt = ndt * tijk[mn][k];
+                                ar[0][0] += ndt;
+                                ar[1][0] += ndtt;
+                                ar[2][0] += ndtt * (tijk[mn][k] - 1);
+                                ar[1][1] += ndtt * dijk[mn][k];
+                                ar[1][2] += ndtt * dijk[mn][k] * (dijk[mn][k] - 1);
+                                ar[0][3] += ndtd * (dijk[mn][k] - 1) * (dijk[mn][k] - 2);
+                            }
+                        }
+                        // b) Terme exponentiel en delta (pour les mélanges)
+                        for (int k = 1 + kpolij[mn]; k <= kpolij[mn] + kexpij[mn]; ++k){
+                            cij0 = cijk[mn][k] * delp[2]; // Contribution coefficient c
+                            eij0 = eijk[mn][k] * del;     // Contribution coefficient e
+                            ndt = xijf * nijk[mn][k] * delp[dijk[mn][k]] * exp(cij0 + eij0 + gijk[mn][k] + tijk[mn][k] * lntau);
+                            ex = dijk[mn][k] + 2 * cij0 + eij0;
+                            ex2 = (ex * ex - dijk[mn][k] + 2 * cij0);
+                            ar[0][1] += ndt * ex;
+                            ar[0][2] += ndt * ex2;
+                            if(itau > 0){
+                                ndtt = ndt * tijk[mn][k];
+                                ar[0][0] += ndt;
+                                ar[1][0] += ndtt;
+                                ar[2][0] += ndtt * (tijk[mn][k] - 1);
+                                ar[1][1] += ndtt * ex;
+                                ar[1][2] += ndtt * ex2;
+                                ar[0][3] += ndt * (ex * (ex2 - 2 * (dijk[mn][k] - 2 * cij0)) + 2 * dijk[mn][k]);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+
+static void tTermsGERG(const double lntau, const std::vector<double> &x)
+{
+    // Calcule les parties dépendant de la température (tau) pour l'équation d'état GERG-2008.
+
+    int i, mn;
+    double taup0[13]; // [12+1], stockage temporaire pour les puissances de tau spécifiques à la forme courte
+
+    // 1. Précalcule taup0[k] pour un composant de référence (ici propane, i=5)
+    i = 5;  // Utilisation du propane (arbitraire ici) pour accélérer certains accès mémoire
+    for (int k = 1; k <= kpol[i] + kexp[i]; ++k){
+        taup0[k] = exp(toik[i][k] * lntau); // taup0[k] = tau^(toik[i][k])
+    }
+
+    // 2. Calcule taup[i][k] pour chaque composant pur
+    for (int i = 1; i <= NcGERG; ++i){
+        if (x[i] > epsilon){
+            if (i > 4 && i != 15 && i != 18 && i != 20 ) {
+                // Pour la plupart des composants "standards", on utilise taup0[k] précalculé
+                for (int k = 1; k <= kpol[i] + kexp[i]; ++k){
+                    taup[i][k] = noik[i][k] * taup0[k];
+                }
+            }
+            else{
+                // Pour les cas particuliers (CO2, N2, O2, Ar, H2, He, H2O, Hg), on recalcule à la volée
+                for (int k = 1; k <= kpol[i] + kexp[i]; ++k){
+                    taup[i][k] = noik[i][k] * exp(toik[i][k] * lntau);
+                }
+            }
+        }
+    }
+
+    // 3. Calcule taupijk[mn][k] pour chaque paire d'interaction binaire
+    for (int i = 1; i <= NcGERG - 1; ++i) {
+        if (x[i] > epsilon){
+            for (int j = i + 1; j <= NcGERG; ++j) {
+                if (x[j] > epsilon) {
+                    mn = mNumb[i][j]; // Index unique pour chaque paire (i,j)
+                    if (mn >= 0) {
+                        for (int k = 1; k <= kpolij[mn]; ++k) {
+                            taupijk[mn][k] = nijk[mn][k] * exp(tijk[mn][k] * lntau);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+
+static void PseudoCriticalPointGERG(const std::vector<double> &x, double &Tcx, double &Dcx)
+{
+    // Calcule le point pseudo-critique du mélange à partir des fractions molaires x.
+    // Tcx : température pseudo-critique du mélange (K)
+    // Dcx : densité pseudo-critique du mélange (mol/L ou mol/m³ selon unité de Dc)
+    // La méthode utilise une moyenne pondérée sur les composants purs.
+
+    double Vcx;      // Volume critique pseudo-mélange
+    Tcx = 0;         // Initialisation de la température pseudo-critique
+    Vcx = 0;         // Initialisation du volume critique pseudo-mélange
+    Dcx = 0;         // Initialisation de la densité pseudo-critique (sera calculée à la fin)
+
+    // Boucle sur les composants du mélange
+    for (int i = 1; i <= NcGERG; ++i){
+        // Moyenne pondérée de la température critique
+        Tcx = Tcx + x[i] * Tc[i];
+
+        // Moyenne pondérée du volume critique (le volume critique = 1 / densité critique)
+        Vcx = Vcx + x[i] / Dc[i];
+    }
+
+    // Après la boucle, calcul de la densité critique totale (inverse du volume critique moyen)
+    if (Vcx > epsilon){ 
+        Dcx = 1 / Vcx; 
+    }
+}
