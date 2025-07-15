@@ -1,0 +1,609 @@
+import numpy as np
+
+Rgerg = 8.31446261815324  # J/(mol*K), universal gas constant
+epsilon = 1e-10  
+
+
+def pressiongerg(T,D,x) : 
+    ar = alphargerg(T,D,x) #tableau qui stocke les dérivées partielles de la fonction de Helmholtz
+    Z = 1 + ar[0][1] # Compressibility factor
+    P = D*Rgerg*T*Z 
+    dPdD = Rgerg*T*(1+2*ar[0][1] + ar[0][2])
+    return P, dPdD
+
+
+def densitegerg(T, P, x, epsilon=1e-8, tolerance=1e-6, Npoints=1000):
+    """
+    Version améliorée de la recherche de densité avec GERG-2008 :
+    - Recherche de racines multiples
+    - Filtrage des points stables (dPdD > 0)
+    - Sélection de la phase la plus stable (enthalpie minimale)
+    """
+
+    if P <= epsilon:
+        return ("Erreur : Pression non physique. Retourne la densité des gaz parfait", P/ (Rgerg*T))
+
+    # Point critique estimé, domaine de recherche
+    Tcx, Dcx = pointcritiquegerg(x, epsilon)
+    Dmin = Dcx * 1e-3
+    Dmax = Dcx * 5
+
+    Dvals = np.logspace(np.log10(Dmin), np.log10(Dmax), Npoints) #valeurs de densités à exporer -en log-
+    racines = []
+
+    plog = np.log(P)
+
+    for i in range(Npoints - 1):
+        D1, D2 = Dvals[i], Dvals[i + 1]
+
+        # Calcul de la pression aux deux points
+        try:
+            P1, _ = pressiongerg(T, D1, x)
+            P2, _ = pressiongerg(T, D2, x)
+        except:
+            continue
+
+        if (P1 - P) * (P2 - P) < 0:  # Changement de signe ⇒ racine probable
+
+            # Méthode de Newton-Raphson localisée dans l'intervalle
+            Dguess = (D1 + D2) / 2 #initialisation de la densité
+            D = Dguess
+            for _ in range(50):
+                try:
+                    Pcalc, dPdD = pressiongerg(T, D, x)
+                except:
+                    break
+
+                if dPdD < epsilon or Pcalc < epsilon:
+                    break  # Instable ou non physique
+
+                delta = (np.log(Pcalc) - plog) * Pcalc / (-D * dPdD)
+                D_new = D * np.exp(-delta)
+
+                if abs(D_new - D) < tolerance:
+                    # Vérifie la stabilité
+                    if dPdD > 0:
+                        racines.append(D_new)
+                    break
+                D = D_new
+
+    # Pas de racine trouvée
+    if len(racines) == 0:
+        return ("Erreur : Aucune convergence. Retour gaz parfait", P / (Rgerg * T))
+
+    # Si une seule solution trouvée
+    if len(racines) == 1:
+        return ("Convergence unique trouvée :", racines[0])
+
+    # Choisir la racine à enthalpie libre minimale
+    best_D = None
+    best_G = np.inf
+    for D in racines:
+        try:
+            P, dPdD, d2PdTD, Cv, Cp, W, A, G, U, H, S, Z, dPdT, d2PdD2 = proprietesgerg(T, D, x)
+            if G < best_G:
+                best_G= G
+                best_D = D
+        except:
+            continue
+
+    if best_D:
+        return ("Convergence multiple : phase la plus stable retenue", best_D)
+        return("L'enthalipe libre minimale est : ", best_G, "à la densité :", best_D)
+    else:
+        return ("Erreur dans le calcul des enthalpies. Retour gaz parfait", P / (Rgerg * T))
+
+
+
+
+def pointcritiquegerg(x,epsilon) :
+
+
+
+def proprietesgerg(T, D, x) :
+    Mm = massemolaire(x,M) #masse molaire du mélange
+    a0 = alha0gerg(T,D,x) #calcul de a0
+    ar = alphargerg(T, D, x)  #calcul de alpha
+    Z = 1 + ar[0][1]  # Compressibility factor
+    P = D * Rgerg * T * Z  # Pressure calculation
+    dPdD = Rgerg * T * (1 + 2 * ar[0][1] + ar[0][2])  # Derivative of pressure with respect to density
+    d2PdTD = Rgerg * (1 + 2 * ar[0][1] + ar[0][2] - 2 * ar[1][1] - ar[1][2])  # Second derivative of pressure with respect to temperature and density
+    dPdT = D * Rgerg * (1 + ar[0][1] - ar[1][1])  # Derivative of pressure with respect to temperature
+    A = Rgerg * T * (a0[0] + ar[0][0]) #energie libre d'helmoltz
+    G = Rgerg*T * (1 + ar[0][1] + a0[0] + ar[0][0])
+    U = Rgerg*T * (a0[1] + ar[1][0])
+    H = Rgerg*T * (1 + ar[0][1] + a0[1] + ar[1][0])
+    S = Rgerg * (a0[1] + ar[1][0] - a0[0] - ar[0][0])
+    Cv = -Rgerg * (a0[2] + ar[2][0])
+    if (D > epsilon) : 
+        Cp = Cv + T * (dPdT / D) * (dPdT / D) / dPdD
+        d2PdD2 = Rgerg*T * (2 * ar[0][1] + 4 * ar[0][2] + ar[0][3]) / D
+    else : 
+        Cp = Cv + Rgerg   # Limite gaz parfait
+        d2PdD2 = 0
+    W = 1000 * Cp / Cv * dPdD / Mm
+    if (W < 0) :  W = 0 
+    W = np.sqrt(W)
+    return P, dPdD, d2PdTD, Cv, Cp, W, A, G, U, H, S, Z, dPdT, d2PdD2  # Retourne les propriétés thermodynamiques calculées
+                    
+                    
+
+def alha0gerg(T, D, x, rho, epsilon=1e-10) :
+    # Coefficients pour le calcul de a0
+    a0 = [0, 0, 0]  # a0[0]: a0, a0[1]: d(a0)/dT, a0[2]: d²(a0)/dT²
+    if D>epsilon : 
+        logD = np.log(D)
+    else : 
+        logD = np.log(epsilon)
+    logT = np.log(T)
+    for i in range(len(x)): #boucle sur les composants
+        if x[i] > epsilon:  #que les commposants présents
+            LogxD = logD + np.log(x[i])
+            logri = np.log(rho) + np.log(x[i])
+            sum0 = 0
+            sum1 = 0
+            sum2 = 0
+            for j in range(4,8):  #boucle sur les termes hyperboliqes
+                if th0i[i][j] > epsilon : 
+                    th0T = th0i[i][j] /T
+                    ep = np.exp(th0T)
+                    em = 1/ep
+                    hsn = (ep-em)/2
+                    hcn = (ep+em)/2
+                if j == 4 or j == 6 : 
+                    loghyp = np.log(np.abs(hsn))
+                    sum0 += n0i[i][j] *loghyp
+                    sum1 += n0i[i][j]*th0T*hcn/hsn
+                    sum2 += n0i[i][j]*th0T*th0T/(hcn*hsn)
+                else : 
+                    loghyp = np.log(np.abs(hcn))
+                    sum0 += n0i[i][j] * loghyp
+                    sum1 += n0i[i][j] * th0T * hsn / hcn
+                    sum2 += n0i[i][j] * th0T * th0T / (hsn * hcn)
+        a0[0] += +x[i] * (LogxD + n0i[i][1] + n0i[i][2] / T - n0i[i][3] * np.log(T) + sum0)
+        a0[1] += +x[i] * (n0i[i][3] + n0i[i][2] / T + sum1)
+        a0[2] += -x[i] * (n0i[i][3] + sum2)
+    return a0  # Retourne le tableau a0 avec les valeurs calculées
+
+
+ 
+def alphargerg(T, D, x) :
+    ar = np.zeros((3, 4))  # Tableau pour stocker les dérivées partielles de la fonction de Helmholtz
+    Dr, Tr = parametrereduits(x, xold, Drold, Trold, T, D)  # Calcule Dr et Tr pour la composition x
+    delp = D / Dr                   # Densité réduite (delta)
+    tau = Tr / T                     # Température réduite (tau)
+    lntau = np.log(tau)
+
+    #1. Contribution des fluides purs : alpha0ir
+    for i in range(len(x)):
+        if x[i] > epsilon:
+            #terme polynomoial
+            for k in range(1,kop[i]+1) : 
+                ndt = n0i[i][k] * delp**(doik[i][k]) * tau**(toik[i][k]) 
+                ndtd = ndt * doik[i][k] / delp
+                ndtt = ndt * toik[i][k] / tau
+                ar[0][0] += ndt  # Contribution à a0
+                ar[0][1] += ndtd   # Contribution à d(a0)/dDelta
+                ar[0][2] += ndtd * (doik[i][k] - 1) / delp  # Contribution à d²(a0)/dDelta²
+                ar[0][3] += ndtd * (doik[i][k] - 1) * (doik[i][k]-2) / delp**2  # Contribution à d³(a0)/dD³
+                ar[1][0] += ndtt  # Contribution à d(a0)/dTau
+                ar[2][0] += ndtt * (toik[i][k] - 1) / tau  # Contribution à d²(a0)/dT²
+                ar[1][1] += ndtt * doik[i][k] / delp  # croisée tau et Delta
+                ar[1][2] += ndtt * doik[i][k] *(doik[i][k] - 1) / (delp**2)
+            #terme exponentiel
+            for k in range(kpol[i] + 1, kpol[i] + kexp[i] + 1):
+                ndt = n0i[i][k] * delp**(doik[i][k]) * tau**(toik[i][k]) * np.exp(-delp**(coik[i][k]))
+                ndtt = ndt * toik[i][k]/ tau
+                ar[0][0] += ndt  # Contribution à a0
+                ar[0][1] += ndt * doik[i][k] / delp - ndt *coik[i][k] * delp**(coik[i][k]-1) # Contribution à d(a0)/dDelta
+                ar[0][2] += ndt * doik[i][k]*(doik[i][k]-1) / delp**2 - ndt *coik[i][k] * doik[i][k] * delp**(coik[i][k]-2) - ndt *coik[i][k] * (doik[i][k] +coik[i][k] - 1) * delp**(coik[i][k]-2) + ndt *coik[i][k]**2 * delp**((coik[i][k] - 1)**2)
+                ar[1][0] += ndtt
+                ar[2][0] += ndtt * (toik[i][k] - 1)/tau
+                ar[1][1] += ndtt * doik[i][k] / delp - ndtt *coik[i][k] * delp**(coik[i][k]-1)
+                ar[1][2] += ndtt * doik[i][k]*(doik[i][k]-1) / delp**2 - ndtt *coik[i][k] * doik[i][k] * delp**(coik[i][k]-2) - ndtt *coik[i][k] * (doik[i][k] +coik[i][k] - 1) * delp**(coik[i][k]-2) + ndtt *coik[i][k]**2 * delp**((coik[i][k] - 1)**2)
+                ar[0][3] += ndt * doik[i][k]*(doik[i][k]-1)*(doik[i][k]-2) / delp**3 - ndt * doik[i][k]*(doik[i][k]-1) *coik[i][k] * doik[i][k] * delp**(coik[i][k]-3) - ndt *coik[i][k] * doik[i][k] *(doik[i][k] +coik[i][k] - 2)* delp**(coik[i][k]-3) + ndt *coik[i][k]**2 * delp**((coik[i][k] - 1)**2 - 1)- ndt *coik[i][k] * (doik[i][k] +coik[i][k] - 1) * (doik[i][k] +coik[i][k] - 2)* delp**(coik[i][k]-3) + ndt * (coik[i][k]**2) * (doik[i][k] +coik[i][k] - 1) * delp**(2*coik[i][k]-3) + ndt *coik[i][k]**2 * ((coik[i][k] - 1)**2 + doik[i][k])* delp**((coik[i][k] - 1)**2 - 1) - ndt *coik[i][k]**3 * ((coik[i][k] - 1)**3)
+    #2. Contribution des interactions binaires : alphaijr
+    for i in range(len(x)):
+        if x[i] > epsilon:
+            for j in range(i+1, len(x)+1) :
+                mn = mNumb[i][j] # Index d’accès aux données d’interaction binaire
+                if (mn >= 0) :
+                    xijf = x[i] * x[j] * fij[i][j]
+                    #terme polynomoial
+                    for k in range(1,kop[i]+1) : 
+                        ndt = xijf * nij[i][k]* (delp**[dijk[mn][k]]) * (tau**tijk[mn][k])
+                        ndtd = ndt * dijk[mn][k]/ delp
+                        ndtt = ndt * tijk[mn][k] / tau
+                        ar[0][1] += ndtd
+                        ar[0][2] += ndtd * (dijk[mn][k] - 1)/ delp
+                        ar[0][3] += ndtd * (dijk[mn][k] - 1) * (dijk[mn][k] - 2) / delp**2
+                        ar[0][0] += ndt
+                        ar[1][0] += ndtt
+                        ar[2][0] += ndtt * (tijk[mn][k] - 1)/ tau
+                        ar[1][1] += ndtt * dijk[mn][k] / delp
+                        ar[1][2] += ndtt * dijk[mn][k] * (dijk[mn][k] - 1)/ delp**2
+                        ar[0][3] += ndtd * (dijk[mn][k] - 1) * (dijk[mn][k] - 2) * (dijk[mn][k] - 3) / delp**3
+                    #terme exponentiel
+                    for k in range(kpol[i] + 1, kpol[i] + kexp[i] + 1):
+                        ndt = xijf * nij[i][k] * (delp**dijk[mn][k]) * (tau**tijk[mn][k]) * np.exp(-etaijk[mn][k] *(delp -eijk[mn][k])**2 - betaijk[mn][k]*(delp - gammaijk[mn][k])**2)  # Interaction binaire
+                        ndtt = ndt * tijk[mn][k] / tau
+                        ar[0][0] += ndt  # Contribution à a0
+                        ar[0][1] += ndt * doik[i][k] / delp + ndt * (-delp*(2*etaijk[mn][k] + 2*betaijk[mn][k]) +2*(etaijk[mn][k] * eijk[mn][k] + betaijk[mn][k] * gammaijk[mn][k])) # Contribution à d(a0)/dDelta
+                        ar[0][2] += ndt * doik[i][k]*(doik[i][k]-1) / delp**2 + ndt * doik[i][k] /delp * (-delp*(2*etaijk[mn][k] + 2*betaijk[mn][k]) +2*(etaijk[mn][k] * eijk[mn][k] + betaijk[mn][k] * gammaijk[mn][k])) + ndt * doik[mn][k] /delp * 2*(etaijk[mn][k] * eijk[mn][k] + betaijk[mn][k] * gammaijk[mn][k])- ndt * (doik[i][k] + 1) *(2*etaijk[mn][k] + 2*betaijk[mn][k]) + ndt * ((-delp*(2*etaijk[mn][k] + 2*betaijk[mn][k]) +2*(etaijk[mn][k] * eijk[mn][k] + betaijk[mn][k] * gammaijk[mn][k]))**2) 
+                        ar[1][0] += ndtt
+                        ar[2][0] += ndtt * (toik[i][k] - 1)/tau
+                        ar[1][1] += ndtt * doik[i][k] / delp - ndtt *coik[i][k] * delp**(coik[i][k]-1)
+                        ar[1][2] += ndtt * doik[i][k]*(doik[i][k]-1) / delp**2 - ndtt *coik[i][k] * doik[i][k] * delp**(coik[i][k]-2) - ndtt *coik[i][k] * (doik[i][k] +coik[i][k] - 1) * delp**(coik[i][k]-2) + ndtt *coik[i][k]**2 * delp**((coik[i][k] - 1)**2)
+                        ar[0][3] += XXX # Contribution à d³(a0)/dD³ à finir
+    return ar  # Retourne le tableau ar avec les valeurs calculées
+                
+
+
+
+def massemolaire(x, M) :
+    return np.sum(np.array(x) * np.array(MMiGERG))
+
+
+
+def parametrereduits(x,xold,Drold, Trold, T,D) : 
+    flag = 0 
+    if x == xold : 
+        return Drold, Trold
+    else : 
+        Dr = 0 #densité de réduction du mélange
+        Vr = 0 #volume molaire de réduction du mélange (avant inversion)
+        Tr = 0 #température de réduction du 
+        for i in range(len(x)) :
+            if x[i]>epsilon : 
+                F = 1
+                for j in range(i,len(xold)) :
+                    if x[j]>epsilon : 
+                        xij = F * (x[i] * x[j]) * (x[i] + x[j]) #Calcul du facteur de pondération binaire ou ternaire (selon GERG)
+                        Vr += xij * gvij[i][j] / (bvij[i][j] * x[i] + x[j]) #Contribution au volume de réduction du mélange
+                        Tr += xij * gtij[i][j] / (btij[i][j] * x[i] + x[j]) #Contribution à la température de réduction du mélangeF = 2
+                        F = 2
+            if Vr > epsilon : 
+                Dr = 1 / Vr
+            Drold = Dr
+            Trold = Tr
+        return Dr, Tr
+        
+
+
+
+
+
+
+
+
+
+# Molar masses [g/mol]
+MMiGERG = np.zeros(22)  # Molar masses for GERG-2008 components
+MMiGERG[0] = 16.04246;    # Methane
+MMiGERG[1] = 28.0134;     # Nitrogen
+MMiGERG[2] = 44.0095;     # Carbon dioxide
+MMiGERG[3] = 30.06904;    # Ethane
+MMiGERG[4] = 44.09562;    # Propane
+MMiGERG[5] = 58.1222;     # Isobutane
+MMiGERG[6] = 58.1222;     # n-Butane
+MMiGERG[7] = 72.14878;    # Isopentane
+MMiGERG[8] = 72.14878;    # n-Pentane
+MMiGERG[9] = 86.17536;   # Hexane
+MMiGERG[10] = 100.20194;  # Heptane
+MMiGERG[11] = 114.22852;  # Octane
+MMiGERG[12] = 128.2551;   # Nonane
+MMiGERG[13] = 142.28168;  # Decane
+MMiGERG[14] = 2.01588;    # Hydrogen
+MMiGERG[15] = 31.9988;    # Oxygen
+MMiGERG[16] = 28.0101;    # Carbon monoxide
+MMiGERG[17] = 18.01528;   # Water
+MMiGERG[18] = 34.08088;   # Hydrogen sulfide
+MMiGERG[19] = 4.002602;   # Helium
+MMiGERG[20] = 39.948;     # Argon
+
+
+# Critical densities [mol/l]
+Dc = np.zeros(22)  # Critical densities for GERG-2008 components
+Dc[0] = 10.139342719
+Dc[1] = 11.1839
+Dc[2] = 10.624978698
+Dc[3] = 6.87085454
+Dc[4] = 5.000043088
+Dc[5] = 3.86014294
+Dc[6] = 3.920016792
+Dc[7] = 3.271
+Dc[8] = 3.215577588
+Dc[9] = 2.705877875
+
+
+  # Critical temperatures [K]
+Tc = np.zeros(22)  # Critical temperatures for GERG-2008 components
+Tc[0] = 190.564
+Tc[1] = 126.192
+Tc[2] = 304.1282
+Tc[3] = 305.322
+Tc[4] = 369.825
+Tc[5] = 407.817
+Tc[6] = 425.125
+Tc[7] = 460.35
+Tc[8] = 469.7
+Tc[9] = 507.82
+
+
+# Coefficients of pure fluid equations
+n0i = np.zeros((22, 24))  # Coefficients for pure fluid equations
+coik = np.zeros((22, 24))  # Coefficients for pure fluid equations
+doik = np.zeros((22, 24))  # Coefficients for pure fluid
+toik = np.zeros((22, 24))  # Coefficients for pure fluid equations
+th0i = np.zeros((22, 24))  # Coefficients for pure fluid equations
+
+n0i[0][2] = 4.00088;  n0i[0][3] = 0.76315;  n0i[0][4] = 0.0046;   n0i[0][5] = 8.74432;  n0i[0][6] = -4.46921; n0i[0][0] = 29.83843397;  n0i[0][1] = -15999.69151
+n0i[1][2] = 3.50031;  n0i[1][3] = 0.13732;  n0i[1][4] = -0.1466;  n0i[1][5] = 0.90066;  n0i[1][6] = 0;        n0i[1][0] = 17.56770785;  n0i[1][1] = -2801.729072
+n0i[2][2] = 3.50002;  n0i[2][3] = 2.04452;  n0i[2][4] = -1.06044; n0i[2][5] = 2.03366;  n0i[2][6] = 0.01393;  n0i[2][0] = 20.65844696;  n0i[2][1] = -4902.171516
+n0i[3][2] = 4.00263;  n0i[3][3] = 4.33939;  n0i[3][4] = 1.23722;  n0i[3][5] = 13.1974;  n0i[3][6] = -6.01989; n0i[3][0] = 36.73005938;  n0i[3][1] = -23639.65301
+n0i[4][2] = 4.02939;  n0i[4][3] = 6.60569;  n0i[4][4] = 3.197;    n0i[4][5] = 19.1921;  n0i[4][6] = -8.37267; n0i[4][0] = 44.70909619;  n0i[4][1] = -31236.63551
+n0i[5][2] = 4.06714;  n0i[5][3] = 8.97575;  n0i[5][4] = 5.25156;  n0i[5][5] = 25.1423;  n0i[5][6] = 16.1388;  n0i[5][0] = 34.30180349;  n0i[5][1] = -38525.50276
+n0i[6][2] = 4.33944;  n0i[6][3] = 9.44893;  n0i[6][4] = 6.89406;  n0i[6][5] = 24.4618;  n0i[6][6] = 14.7824;  n0i[6][0] = 36.53237783;  n0i[6][1] = -38957.80933
+n0i[7][2] = 4;        n0i[7][3] = 11.7618;  n0i[7][4] = 20.1101;  n0i[7][5] = 33.1688;  n0i[7][6] = 0;        n0i[7][0] = 43.17218626;  n0i[7][1] = -51198.30946
+n0i[8][2] = 4;        n0i[8][3] = 8.95043;  n0i[8][4] = 21.836;   n0i[8][5] = 33.4032;  n0i[8][6] = 0;        n0i[8][0] = 42.67837089;  n0i[8][1] = -45215.83
+n0i[9][2] = 4;        n0i[9][3] = 11.6977;  n0i[9][4] = 26.8142;  n0i[9][5] = 38.6164;  n0i[9][6] = 0;        n0i[9][0] = 46.99717188;  n0i[9][1] = -52746.83318
+
+th0i[0][3] = 820.659
+th0i[0][4] = 178.41
+th0i[0][5] = 1062.82
+th0i[0][6] = 1090.53
+
+th0i[-1][3] = 662.738
+th0i[-1][4] = 680.562
+th0i[-1][5] = 1740.06
+th0i[-1][6] = 0
+
+th0i[1][3] = 919.306
+th0i[1][4] = 865.07
+th0i[1][5] = 483.553
+th0i[1][6] = 341.109
+
+th0i[2][3] = 559.314
+th0i[2][4] = 223.284
+th0i[2][5] = 1031.38
+th0i[2][6] = 1071.29
+
+th0i[3][3] = 479.856
+th0i[3][4] = 200.893
+th0i[3][5] = 955.312
+th0i[3][6] = 1027.29
+
+th0i[4][3] = 438.27
+th0i[4][4] = 198.018
+th0i[4][5] = 1905.02
+th0i[4][6] = 893.765
+
+th0i[5][3] = 468.27
+th0i[5][4] = 183.636
+th0i[5][5] = 1914.1
+th0i[5][6] = 903.185
+
+th0i[6][3] = 292.503
+th0i[6][4] = 910.237
+th0i[6][5] = 1919.37
+th0i[6][6] = 0
+
+th0i[7][3] = 178.67
+th0i[7][4] = 840.538
+th0i[7][5] = 1774.25
+th0i[7][6] = 0
+
+th0i[8][3] = 182.326
+th0i[8][4] = 859.207
+th0i[8][5] = 1826.59
+th0i[8][6] = 0
+
+ # Carbon dioxide
+ coik[2][1] = 0;   doik[2][1] = 1;   toik[2][1] = 0        
+ coik[2][2] = 0;   doik[2][2] = 1;   toik[2][2] = 1.25     
+ coik[2][3] = 0;   doik[2][3] = 2;   toik[2][3] = 1.625    
+ coik[2][4] = 0;   doik[2][4] = 3;   toik[2][4] = 0.375
+ coik[2][5] = 1;   doik[2][5] = 3;   toik[2][5] = 0.375
+ coik[2][6] = 1;   doik[2][6] = 3;   toik[2][6] = 1.375
+ coik[2][7] = 1;   doik[2][7] = 4;   toik[2][7] = 1.125
+ coik[2][8] = 1;   doik[2][8] = 5;   toik[2][8] = 1.375
+ coik[2][9] = 1;   doik[2][9] = 6;   toik[2][9] = 0.125
+ coik[2][10] = 1;  doik[2][10] = 6;  toik[2][10] = 1.625
+ coik[2][11] = 2;  doik[2][11] = 1;  toik[2][11] = 3.75
+ coik[2][12] = 2;  doik[2][12] = 4;  toik[2][12] = 3.5
+ coik[2][13] = 3;  doik[2][13] = 1;  toik[2][13] = 7.5
+ coik[2][14] = 3;  doik[2][14] = 1;  toik[2][14] = 8
+ coik[2][15] = 3;  doik[2][15] = 3;  toik[2][15] = 6
+ coik[2][16] = 3;  doik[2][16] = 3;  toik[2][16] = 16
+ coik[2][17] = 3;  doik[2][17] = 4;  toik[2][17] = 11
+ coik[2][18] = 5;  doik[2][18] = 5;  toik[2][18] = 24
+ coik[2][19] = 5;  doik[2][19] = 5;  toik[2][19] = 26
+ coik[2][20] = 5;  doik[2][20] = 5;  toik[2][20] = 28
+ coik[2][21] = 6;  doik[2][21] = 5;  toik[2][21] = 24
+ coik[2][22] = 6;  doik[2][22] = 5;  toik[2][22] = 26
+
+
+for i in range(1, 22 + 1):
+
+    # Remplissage de coik, doik, toik pour tous i
+    coeffs = [
+        (0, 1, 0.25),
+        (0, 1, 1.125),
+        (0, 1, 1.5),
+        (0, 2, 1.375),
+        (0, 3, 0.25),
+        (0, 7, 0.875),
+        (1, 2, 0.625),
+        (1, 5, 1.75),
+        (2, 1, 3.625),
+        (2, 4, 3.625),
+        (3, 3, 14.5),
+        (3, 4, 12.0),
+    ]
+    for j, (c, d, t) in enumerate(coeffs, start=1):
+        coik[i][j] = c
+        doik[i][j] = d
+        toik[i][j] = t
+
+# --- Deuxième boucle : spécial pour i = 1 à 4 sauf 3 ---
+for i in range(1, 5):
+    if i == 3:
+        continue
+
+    coeffs_i = [
+        (0, 1, 0.125),
+        (0, 1, 1.125),
+        (0, 2, 0.375),
+        (0, 2, 1.125),
+        (0, 4, 0.625),
+        (0, 4, 1.5),
+        (1, 1, 0.625),
+        (1, 1, 2.625),
+        (1, 1, 2.75),
+        (1, 2, 2.125),
+        (1, 3, 2.0),
+        (1, 6, 1.75),
+        (2, 2, 4.5),
+        (2, 3, 4.75),
+        (2, 3, 5.0),
+        (2, 4, 4.0),
+        (2, 4, 4.5),
+        (3, 2, 7.5),
+        (3, 3, 14.0),
+        (3, 4, 11.5),
+        (6, 5, 26.0),
+        (6, 6, 28.0),
+        (6, 6, 30.0),
+        (6, 7, 16.0)
+    ]
+
+    for j, (c, d, t) in enumerate(coeffs_i, start=1):
+        coik[i][j] = c
+        doik[i][j] = d
+        toik[i][j] = t
+
+
+# Generalized parameters
+fij = np.zeros((22, 22))  # Coefficients for binary interactions
+ fij[0][1] = 1;                # Methane-Nitrogen
+ fij[0][2] = 1;                # Methane-CO2
+ fij[0][3] = 1;                # Methane-Ethane
+ fij[0][4] = 1;                # Methane-Propane
+ fij[0][14] = 1;               # Methane-Hydrogen
+ fij[0][5] = 0.771035405688;   # Methane-Isobutane
+ fij[0][6] = 1;                # Methane-n-Butane
+ fij[5][6] = -0.0551240293009; # Isobutane-n-Butane
+
+# Mixture parameters for reducing variables
+bvij = np.zeros((22, 22))  # Coefficients for binary volume interactions
+gvij = np.zeros((22, 22))  # Coefficients for binary volume interactions
+btij = np.zeros((22, 22))  # Coefficients for binary temperature interactions
+gtij = np.zeros((22, 22))  # Coefficients for binary temperature
+
+  bvij[0][1] = 0.998721377;   gvij[0][1] = 1.013950311;   btij[0][1] = 0.99809883;    gtij[0][1] = 0.979273013;   # CH4-N2
+  bvij[0][2] = 0.999518072;   gvij[0][2] = 1.002806594;   btij[0][2] = 1.02262449;    gtij[0][2] = 0.975665369;   # CH4-CO2
+  bvij[0][3] = 0.997547866;   gvij[0][3] = 1.006617867;   btij[0][3] = 0.996336508;   gtij[0][3] = 1.049707697;   # CH4-C2H6
+  bvij[0][4] = 1.00482707;    gvij[0][4] = 1.038470657;   btij[0][4] = 0.989680305;   gtij[0][4] = 1.098655531;   # CH4-C3H8
+  bvij[0][5] = 1.011240388;   gvij[0][5] = 1.054319053;   btij[0][5] = 0.980315756;   gtij[0][5] = 1.161117729;   # CH4-i-C4H10
+  bvij[0][6] = 0.979105972;   gvij[0][6] = 1.045375122;   btij[0][6] = 0.99417491;    gtij[0][6] = 1.171607691;   # CH4-C4H10
+  bvij[0][7] = 1;             gvij[0][7] = 1.343685343;   btij[0][7] = 1;             gtij[0][7] = 1.188899743;   # CH4-i-C5H12
+  bvij[0][8] = 0.94833012;    gvij[0][8] = 1.124508039;   btij[0][8] = 0.992127525;   gtij[0][8] = 1.249173968;   # CH4-C5H12
+  bvij[2][3] = 1.002525718;   gvij[2][3] = 1.032876701;   btij[2][3] = 1.013871147;   gtij[2][3] = 0.90094953;    # CO2-C2H6
+  bvij[2][4] = 0.996898004;   gvij[2][4] = 1.047596298;   btij[2][4] = 1.033620538;   gtij[2][4] = 0.908772477;   # CO2-C3H8
+  bvij[2][5] = 1.076551882;   gvij[2][5] = 1.081909003;   btij[2][5] = 1.023339824;   gtij[2][5] = 0.929982936;   # CO2-i-C4H10
+  bvij[2][6] = 1.174760923;   gvij[2][6] = 1.222437324;   btij[2][6] = 1.018171004;   gtij[2][6] = 0.911498231;   # CO2-C4H10
+  bvij[2][7] = 1.060793104;   gvij[2][7] = 1.116793198;   btij[2][7] = 1.019180957;   gtij[2][7] = 0.961218039;   # CO2-i-C5H12
+  bvij[2][8] = 1.024311498;   gvij[2][8] = 1.068406078;   btij[2][8] = 1.027000795;   gtij[2][8] = 0.979217302;   # CO2-C5H12
+  bvij[3][4] = 0.997607277;   gvij[3][4] = 1.00303472;    btij[3][4] = 0.996199694;   gtij[3][4] = 1.01473019;    # C2H6-C3H8
+  bvij[3][5] = 1;             gvij[3][5] = 1.006616886;   btij[3][5] = 1;             gtij[3][5] = 1.033283811;   # C2H6-i-C4H10
+  bvij[3][6] = 0.999157205;   gvij[3][6] = 1.006179146;   btij[3][6] = 0.999130554;   gtij[3][6] = 1.034832749;   # C2H6-C4H10
+  bvij[3][7] = 1;             gvij[3][7] = 1.045439935;   btij[3][7] = 1;             gtij[3][7] = 1.021150247;   # C2H6-i-C5H12
+  bvij[3][8] = 0.993851009;   gvij[3][8] = 1.026085655;   btij[3][8] = 0.998688946;   gtij[3][8] = 1.066665676;   # C2H6-C5H12
+  bvij[4][5] = 0.999243146;   gvij[4][5] = 1.001156119;   btij[4][5] = 0.998012298;   gtij[4][5] = 1.005250774;   # C3H8-i-C4H10
+  bvij[4][6] = 0.999795868;   gvij[4][6] = 1.003264179;   btij[4][6] = 1.000310289;   gtij[4][6] = 1.007392782;   # C3H8-C4H10
+  bvij[4][7] = 1.040459289;   gvij[4][7] = 0.999432118;   btij[4][7] = 0.994364425;   gtij[4][7] = 1.0032695;     # C3H8-i-C5H12
+  bvij[4][8] = 1.044919431;   gvij[4][8] = 1.019921513;   btij[4][8] = 0.996484021;   gtij[4][8] = 1.008344412;   # C3H8-C5H12
+  bvij[5][6] = 0.999120311;   gvij[5][6] = 1.00041444;    btij[5][6] = 0.999922459;   gtij[5][6] = 1.001432824;   # C4H10-i-C4H10
+  bvij[5][7] = 1;             gvij[5][7] = 1.002284353;   btij[5][7] = 1;             gtij[5][7] = 1.001835788;   # i-C4H10-i-C5H1
+  bvij[5][8] = 1;             gvij[5][8] = 1.002779804;   btij[5][8] = 1;             gtij[5][8] = 1.002495889;   # i-C4H10-C5H12
+  bvij[6][7] = 1;             gvij[6][7] = 1.002728434;   btij[6][7] = 1;             gtij[6][7] = 1.000792201;   # C4H10-i-C5H12
+  bvij[6][8] = 1;             gvij[6][8] = 1.01815965;    btij[6][8] = 1;             gtij[6][8] = 1.00214364;    # C4H10-C5H12
+
+# Model numbers for excess functions, 10 is for generalized equation
+mNumb = np.zeros((3, 16), dtype=int)
+mNumb[0][0] = 1
+mNumb[0][1] = 3
+mNumb[0][2] = 4
+mNumb[0][3] = 1
+mNumb[0][4] = 2
+mNumb[0][5] = 10
+mNumb[0][6] = 10
+mNumb[0][14] = 7
+mNumb[1][2] = 5
+mNumb[1][3] = 6
+mNumb[3][4] = 10
+mNumb[3][5] = 10
+mNumb[3][6] = 10
+mNumb[4][5] = 10
+mNumb[4][6] = 10
+mNumb[5][6] = 10
+
+
+
+def densitegerg_hyp(T,P,x,epsilon, tolerance=1e-6) :
+    flag = 0 #nombre d'échecs successifs
+
+    if P <=epsilon : #vérifie si la pression est positive
+        D = np.abs(P/(Rgerg*T))
+        return ("Erreur dans la pression, on retourne la densité de gaz parfait : ", D)
+   
+    else :      
+        Tcx,Dcx = pointcritiquegerg(x,epsilon)
+        D = np.abs(P/(Rgerg*T)) #estimation gaz parfait pour la phase vapeur
+        plog = np.log(P)
+        i=1
+        while i <= 50 : #boucle d'itération pour la convergence
+            if flag ==1 : 
+                D=Dcx*3 #phase liquide : phase dense
+            elif flag == 2 :
+                D = Dcx*2.5 #entre liquide et critique
+            elif flag == 3 :
+                D = Dcx*2 #zone critiquePcalc, dPdD = pressiongerg(T,D,x)
+            Pcalc, dPdD = pressiongerg(T,D,x) #calcul de la pression et de la dérivée de la pression par rapport à la densité
+            dlog = -np.log(D)
+            if dPdD<epsilon or flag ==2 : #état 2 phases probables
+                vinc = 0.1
+                if D > Dcx : 
+                    vinc = -vinc
+                if (5<i<=10) : vinc = vinc/2
+                elif (10<i<=20) : vinc = vinc/5
+                elif (20<i<=30) : vinc = vinc/10
+                elif (30<i<=50) : vinc = vinc/20
+                dlog += vinc #tente un autre écart
+                D = np.exp(-dlog)
+                Pcalc, dPdD = pressiongerg(T,D,x)
+                if dPdD > 0 and D > Dcx : 
+                    flag = 1 #phase liquide
+                elif dPdD > 0 and D < Dcx :
+                    flag = 0 #phase vapeur
+                i += 1
+            else : #schéma de Newton-Raphson
+                dpdlv = -D*dPdD #dérivée de P par rapport à log(V)
+                vdiff = (np.log(Pcalc) - plog)*Pcalc/dpdlv
+                dlog += - vdiff
+                if np.abs(vdiff) < tolerance :
+                    if dPdD <0 : #si dérivée négative, probablement état 2 phases, on relance
+                        i+= 1
+                        flag = 2
+                    else : 
+                        D = np.exp(-dlog)
+                        Pcalc, dPdD, d2PdTD, Cv, Cp, W, A, G, U, H, S, Z, dPdT, d2PdD2 = proprietesgerg(T, D, x)
+                        if (Pcalc<=0 and dPdD<=0 and d2PdTD<=0) or (Cv<=0 and Cp<=0 and W<=0) : 
+                            return ("Erreur dans la convergence de la densité, on retourne la densité de gaz parfait : ", P/ (Rgerg*T))
+                        else : 
+                            return ("Convergence atteinte, la densité est :", D)
+                else : 
+                    i+=1
+    return ("Erreur dans la convergence de la densité, on retourne la densité de gaz parfait : ", P/ (Rgerg*T))
+
+
